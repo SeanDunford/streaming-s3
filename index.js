@@ -2,13 +2,9 @@
 const { EventEmitter } = require('events');
 const asynccb = require('async');
 const AWS = require('aws-sdk');
-const config = require('../config').aws;
 
-const PERCENT_THRESHOLD = 5;
 const ONE_MEGABYTE = 1024 * 1024;
-
 const defaultOptions = {
-  fileSize: null,
   concurrentParts: 3, // Concurrent parts that will be uploaded to s3 (if read stream is fast enough)
   waitTime: 0, // In seconds (Only applies once all parts are uploaded, used for acknowledgement), 0 = Unlimited
   retries: 5, // Number of times to retry a part.
@@ -17,15 +13,14 @@ const defaultOptions = {
 };
 
 class StreamingS3 extends EventEmitter {
-  constructor(options = {}) {
+  constructor(stream, { s3AccessKey, s3SecretKey, s3Params, options = {} }, cb) {
     super();
     this.options = Object.assign({}, defaultOptions, options);
-    this.fileSize = options.fileSize;
-    this.cb = (err, res) => {
-      if(err) throw err;
-      console.log("How did you even get here?", res);
-      throw new Error("Should not have ended in cb");
-    };
+    this.stream = stream;
+    this.s3AccessKey = s3AccessKey;
+    this.s3SecretKey = s3SecretKey;
+    this.s3Params = s3Params;
+
     this.initialized = false;
 
     // Lets hook our error event in the start so we can easily emit errors.
@@ -35,7 +30,7 @@ class StreamingS3 extends EventEmitter {
   initialize() {
     if (this.initialized) return;
     this.initialized = true;
-    this.bucketName = config.Bucket;
+    this.bucketName = s3Params.Bucket;
 
     // States
     this.waiting = false;
@@ -106,11 +101,12 @@ class StreamingS3 extends EventEmitter {
   setupAws() {
     const credentials = new AWS.SharedIniFileCredentials({ profile: 'wasabi' });
     AWS.config.credentials = credentials;
-    this.s3Client = new AWS.S3({
-      endpoint: new AWS.Endpoint('s3.wasabisys.com'),
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey
-    });
+    const s3Params = {
+      accessKeyId: this.s3AccessKey,
+      secretAccessKey: this.secretAccessKey,
+    }
+    this.s3Client = new AWS.S3();
+    if(options.wasabi) this.s3Client
   }
 
   async uploadStream(stream, fileName) {
@@ -147,12 +143,6 @@ class StreamingS3 extends EventEmitter {
       if (!this.downloadStart) this.downloadStart = Date.now();
       if (typeof chunk === 'string') chunk = Buffer.from(chunk, 'utf-8');
       this.totalDldBytes += chunk.length;
-
-      const currentPercentage = ((this.totalDldBytes / this.fileSize) * 100);
-      if ((currentPercentage - this.dldPercentage) > PERCENT_THRESHOLD) {
-        console.log(`Download Percentage: ${currentPercentage.toFixed(2)}% FileSize: ${this.fileSize}, TotalBytes: ${this.totalDldBytes}`);
-        this.dldPercentage = currentPercentage;
-      }
 
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.emit('data', chunk.length);
@@ -265,11 +255,6 @@ class StreamingS3 extends EventEmitter {
 
     // Remove finished chunks, save memory :)
     this.chunks = this.chunks.filter((chunk) => chunk.finished === false);
-    const currentPercentage = ((this.totalUldBytes / this.fileSize) * 100).toFixed(2);
-    if ((currentPercentage - this.totalUldBytes) > PERCENT_THRESHOLD) {
-      console.log(`Upload Percentage: ${currentPercentage}% FileSize: ${this.fileSize}, TotalBytes: ${this.totalUldBytes}`);
-      this.totalUldBytes = currentPercentage;
-    }
     if (this.chunks.length) {
       asynccb.eachLimit(
         this.chunks,
